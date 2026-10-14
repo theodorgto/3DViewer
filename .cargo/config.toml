@@ -1,0 +1,3 @@
+[env]
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+CMAKE_TOOLCHAIN_FILE = { value = "vendor/opencascade-sys/OCCT/msvc-release.cmake", relative = true }

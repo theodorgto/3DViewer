@@ -1,0 +1,120 @@
+{
+  "name": "3dviewer",
+  "displayName": "3DViewer",
+  "description": "View mesh and STEP models in a VS Code editor",
+  "version": "0.1.0",
+  "publisher": "local-3dviewer",
+  "icon": "icon.png",
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "Visualization"
+  ],
+  "activationEvents": [
+    "onCustomEditor:3dviewer.model"
+  ],
+  "extensionKind": [
+    "ui"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Native CAD import requires a trusted workspace."
+    },
+    "virtualWorkspaces": {
+      "supported": false
+    }
+  },
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "3dviewer.open",
+        "title": "3DViewer: Open Model"
+      }
+    ],
+    "customEditors": [
+      {
+        "viewType": "3dviewer.model",
+        "displayName": "3DViewer",
+        "selector": [
+          {
+            "filenamePattern": "*.[sS][tT][eE][pP]"
+          },
+          {
+            "filenamePattern": "*.[sS][tT][pP]"
+          },
+          {
+            "filenamePattern": "*.[pP][lL][yY]"
+          },
+          {
+            "filenamePattern": "*.[sS][tT][lL]"
+          },
+          {
+            "filenamePattern": "*.[oO][bB][jJ]"
+          },
+          {
+            "filenamePattern": "*.[gG][lL][tT][fF]"
+          },
+          {
+            "filenamePattern": "*.[gG][lL][bB]"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "configuration": {
+      "title": "3DViewer",
+      "properties": {
+        "3dviewer.executablePath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Optional path to model-viewer.exe. Leave empty to use the bundled importer."
+        },
+        "3dviewer.stepTolerance": {
+          "type": "number",
+          "default": 0.001,
+          "minimum": 0.0001,
+          "maximum": 0.01,
+          "description": "Relative STEP tessellation tolerance. Reload the model to apply."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "npm run check-types && npm run lint && node esbuild.js",
+    "watch": "npm-run-all -p watch:*",
+    "watch:esbuild": "node esbuild.js --watch",
+    "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
+    "package": "npm run check-types && npm run lint && node esbuild.js --production",
+    "compile-tests": "tsc -p . --outDir out",
+    "watch-tests": "tsc -p . -w --outDir out",
+    "pretest": "npm run compile-tests && npm run compile && npm run lint",
+    "check-types": "tsc --noEmit && tsc -p tsconfig.webview.json",
+    "lint": "eslint src",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "24.x",
+    "@types/three": "^0.186.0",
+    "@types/vscode": "~1.96.0",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.0.0",
+    "@vscode/vsce": "^4.0.0",
+    "esbuild": "^0.28.1",
+    "eslint": "^10.5.0",
+    "lucide": "^1.57.0",
+    "npm-run-all": "^4.1.5",
+    "three": "^0.186.1",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.61.1"
+  },
+  "overrides": {
+    "diff": "^8.0.4",
+    "serialize-javascript": "^7.0.6"
+  }
+}
