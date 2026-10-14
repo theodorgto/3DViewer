@@ -33,6 +33,21 @@ Imports run in a cancellable child process with a three-minute timeout. Closing
 the editor terminates the active import. Errors retain the previous model.
 File changes require the toolbar's Reload action.
 
+The loading bar shows the current import stage and elapsed time. STEP progress
+advances at real stage boundaries, not as a time-remaining estimate. Formats
+without detailed stages use an animated indicator. The bar resets on reload
+and clears on completion, errors, or cancellation.
+
+STEP reloads reuse a checksum-verified mesh cache shared with the desktop viewer.
+The cache is keyed by file contents, STEP tolerance, and importer executable
+contents; changing any of these triggers full import. Cached geometry retains
+the same quality and incomplete-model warnings. No data is uploaded.
+Cached geometry is stored under `%LOCALAPPDATA%\3DViewer\step-cache`, with a
+512 MiB eviction budget. Delete this directory to clear it. The importer honors
+`MODEL_VIEWER_DISABLE_CACHE=1` and `MODEL_VIEWER_CACHE_DIR` environment variables;
+restart VS Code from that environment to apply them. Cache errors fall back to
+normal import. First imports still perform full CAD processing.
+
 ## Geometry Limitations
 
 This is a viewer, not a CAD editor or a universal format converter. STEP

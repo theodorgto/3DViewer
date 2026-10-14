@@ -408,44 +408,57 @@ fn load_step(path: &Path, tolerance: f64) -> Result<RawMesh> {
         eprintln!("STEP: reading with OpenCASCADE");
     }
     opencascade_sys::b_rep::reset_skipped_cad_faces();
-    let shape = opencascade::primitives::Shape::read_step(path)
-        .context("OpenCASCADE cannot read this STEP file")?;
+    crate::import_job::report_progress(Some(0.15), "Reading STEP geometry");
+    let mut reader = opencascade_sys::step_control::STEPControl_Reader_new();
+    let status = opencascade_sys::step_control::read_step(
+        reader.pin_mut(),
+        path.to_string_lossy().into_owned(),
+    );
+    ensure!(
+        status == opencascade_sys::if_select::IFSelect_ReturnStatus::IFSelect_RetDone,
+        "OpenCASCADE cannot read this STEP file"
+    );
+    crate::import_job::report_progress(Some(0.30), "Transferring CAD geometry");
+    reader
+        .pin_mut()
+        .TransferRoots(&opencascade_sys::message::Message_ProgressRange_new());
+    crate::import_job::report_progress(Some(0.65), "Repairing surfaces");
+    let shape = opencascade_sys::step_control::one_shape_step(&reader);
+    drop(reader);
     if trace {
         eprintln!(
             "STEP: transferred CAD shapes in {:.2}s",
             started.elapsed().as_secs_f64()
         );
     }
-    let coarse = shape
-        .mesh_with_tolerance(0.05)
-        .context("Cannot tessellate STEP surfaces")?;
+    crate::import_job::report_progress(Some(0.80), "Tessellating surfaces");
+    let coarse = step_geometry(&shape, 0.05).context("Cannot tessellate STEP surfaces")?;
     ensure!(
-        !coarse.vertices.is_empty(),
+        !coarse.positions.is_empty(),
         "STEP contains no renderable surfaces"
     );
     let minimum = coarse
-        .vertices
+        .positions
         .iter()
         .fold(DVec3::splat(f64::INFINITY), |bounds, point| {
-            bounds.min(DVec3::new(point.x, point.y, point.z))
+            bounds.min(*point)
         });
     let maximum = coarse
-        .vertices
+        .positions
         .iter()
         .fold(DVec3::splat(f64::NEG_INFINITY), |bounds, point| {
-            bounds.max(DVec3::new(point.x, point.y, point.z))
+            bounds.max(*point)
         });
     let absolute_tolerance = ((maximum - minimum).length() * tolerance).max(1e-4);
     if trace {
         eprintln!("STEP: tessellating with deflection {absolute_tolerance}");
     }
-    let mesh = if absolute_tolerance >= 0.05 {
+    let mut raw = if absolute_tolerance >= 0.05 {
         coarse
     } else {
         opencascade_sys::b_rep::reset_skipped_cad_faces();
-        shape
-            .mesh_with_tolerance(absolute_tolerance)
-            .context("Cannot refine STEP tessellation")?
+        crate::import_job::report_progress(Some(0.85), "Refining surface mesh");
+        step_geometry(&shape, absolute_tolerance).context("Cannot refine STEP tessellation")?
     };
     if trace {
         eprintln!(
@@ -453,17 +466,30 @@ fn load_step(path: &Path, tolerance: f64) -> Result<RawMesh> {
             started.elapsed().as_secs_f64()
         );
     }
-    let raw = RawMesh {
-        positions: mesh.vertices.iter().map(|point| DVec3::new(point.x, point.y, point.z)).collect(),
-        indices: mesh.indices.into_iter().map(u32::try_from).collect::<std::result::Result<_, _>>()?,
-        warnings: match opencascade_sys::b_rep::skipped_cad_faces() {
+    raw.warnings = match opencascade_sys::b_rep::skipped_cad_faces() {
             0 => Vec::new(),
             count => vec![format!("Incomplete STEP model: {count} surface(s) could not be tessellated. Do not use this view for CAD verification or measurements.")],
-        },
-        ..Default::default()
     };
     ensure!(!raw.indices.is_empty(), "STEP produced no triangles");
     Ok(raw)
+}
+
+fn step_geometry(
+    shape: &opencascade_sys::topo_ds::TopoDS_Shape,
+    deflection: f64,
+) -> Result<RawMesh> {
+    let mesh = opencascade_sys::b_rep_mesh::render_mesh(shape, deflection)?;
+    Ok(RawMesh {
+        positions: mesh
+            .positions()
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|point| DVec3::new(point[0], point[1], point[2]))
+            .collect(),
+        indices: mesh.indices().to_vec(),
+        ..Default::default()
+    })
 }
 
 pub fn demo() -> Model {
@@ -527,6 +553,49 @@ mod tests {
                 .vertices
                 .iter()
                 .all(|vertex| Vec3::from_array(vertex.position).is_finite()));
+            for tolerance in [0.001, 0.0001] {
+                let reference_shape = opencascade::primitives::Shape::read_step(&path).unwrap();
+                let coarse = reference_shape.mesh_with_tolerance(0.05).unwrap();
+                let minimum = coarse
+                    .vertices
+                    .iter()
+                    .fold(DVec3::splat(f64::INFINITY), |bounds, point| {
+                        bounds.min(DVec3::new(point.x, point.y, point.z))
+                    });
+                let maximum = coarse
+                    .vertices
+                    .iter()
+                    .fold(DVec3::splat(f64::NEG_INFINITY), |bounds, point| {
+                        bounds.max(DVec3::new(point.x, point.y, point.z))
+                    });
+                let deflection = ((maximum - minimum).length() * tolerance).max(1e-4);
+                let mesh = if deflection >= 0.05 {
+                    coarse
+                } else {
+                    reference_shape.mesh_with_tolerance(deflection).unwrap()
+                };
+                let reference = RawMesh {
+                    positions: mesh
+                        .vertices
+                        .iter()
+                        .map(|point| DVec3::new(point.x, point.y, point.z))
+                        .collect(),
+                    indices: mesh
+                        .indices
+                        .into_iter()
+                        .map(|index| u32::try_from(index).unwrap())
+                        .collect(),
+                    ..Default::default()
+                }
+                .finish(name.into())
+                .unwrap();
+                let actual = load(&path, tolerance).unwrap();
+                assert_eq!(
+                    bincode::serialize(&actual).unwrap(),
+                    bincode::serialize(&reference).unwrap(),
+                    "{name} at {tolerance}"
+                );
+            }
         }
     }
 

@@ -4,6 +4,20 @@ import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { randomBytes } from 'node:crypto';
+import { StringDecoder } from 'node:string_decoder';
+
+export interface ImportProgress { fraction: number | null; stage: string; }
+
+export function parseImportProgress(line: string): ImportProgress | undefined {
+	const prefix = 'MODEL_PROGRESS: ';
+	if (!line.startsWith(prefix)) { return; }
+	try {
+		const progress = JSON.parse(line.slice(prefix.length));
+		if (!progress || typeof progress.stage !== 'string' || !progress.stage.length || progress.stage.length > 160) { return; }
+		if (progress.fraction !== null && (typeof progress.fraction !== 'number' || !Number.isFinite(progress.fraction) || progress.fraction < 0 || progress.fraction > 1)) { return; }
+		return { fraction: progress.fraction, stage: progress.stage };
+	} catch { return; }
+}
 
 export const viewType = '3dviewer.model';
 const rendered = new vscode.EventEmitter<{ name: string; vertices: number; triangles: number; visiblePixels: number; warnings: string[] }>();
@@ -43,7 +57,11 @@ class ModelEditor implements vscode.CustomReadonlyEditorProvider {
 				const configured = vscode.workspace.getConfiguration('3dviewer').get<string>('executablePath');
 				const executable = configured || vscode.Uri.joinPath(this.context.extensionUri, 'bin', 'model-viewer.exe').fsPath;
 				const tolerance = vscode.workspace.getConfiguration('3dviewer').get<number>('stepTolerance', 0.001);
-				const model = await importModel(executable, document.uri.fsPath, tolerance, controller.signal);
+				const model = await importModel(executable, document.uri.fsPath, tolerance, controller.signal, progress => {
+					if (!disposed && current === generation && !controller.signal.aborted) {
+						void panel.webview.postMessage({ type: 'progress', ...progress });
+					}
+				});
 				if (!disposed && current === generation) { await panel.webview.postMessage({ type: 'model', model }); }
 			} catch (error) {
 				if (!disposed && current === generation) {
@@ -74,15 +92,30 @@ class ModelEditor implements vscode.CustomReadonlyEditorProvider {
 	}
 }
 
-export async function importModel(executable: string, filename: string, tolerance: number, signal: AbortSignal): Promise<unknown> {
+export async function importModel(executable: string, filename: string, tolerance: number, signal: AbortSignal, onProgress?: (progress: ImportProgress) => void): Promise<unknown> {
 	if (signal.aborted) { throw new Error('Import cancelled'); }
 	const directory = await fs.mkdtemp(path.join(os.tmpdir(), '3dviewer-vscode-'));
 	const output = path.join(directory, 'model.json');
 	try {
+		onProgress?.({ fraction: null, stage: 'Reading model' });
 		await new Promise<void>((resolve, reject) => {
-			const child = spawn(executable, ['--export-model', filename, String(tolerance), output], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+			const child = spawn(executable, ['--export-model', filename, String(tolerance), output], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, MODEL_VIEWER_IMPORT_PROGRESS: '1' } });
 			let detail = ''; let failure: Error | undefined;
-			child.stderr.on('data', chunk => { detail = (detail + String(chunk)).slice(-8192); });
+			const decoder = new StringDecoder('utf8');
+			let pending = '';
+			const reportLine = (line: string) => {
+				const progress = parseImportProgress(line);
+				if (progress && !failure && !signal.aborted) {
+					onProgress?.({ ...progress, fraction: progress.fraction === null ? null : progress.fraction * 0.95 });
+				}
+			};
+			child.stderr.on('data', chunk => {
+				const text = decoder.write(chunk);
+				detail = (detail + text).slice(-8192);
+				const lines = (pending + text).split(/\r?\n/);
+				pending = (lines.pop() || '').slice(-8192);
+				for (const line of lines) { reportLine(line); }
+			});
 			const cancel = () => { failure = new Error('Import cancelled'); child.kill(); };
 			signal.addEventListener('abort', cancel, { once: true });
 			if (signal.aborted) { cancel(); }
@@ -91,11 +124,20 @@ export async function importModel(executable: string, filename: string, toleranc
 			child.once('error', error => { clean(); reject(new Error(`Cannot run the Rust importer: ${error.message}`)); });
 			child.once('close', code => {
 				clean();
+				const tail = decoder.end();
+				detail = (detail + tail).slice(-8192);
+				reportLine(pending + tail);
 				if (failure) { reject(failure); }
 				else if (code !== 0) { reject(new Error(detail.split(/\r?\n/).find(line => line.startsWith('Import failed:')) || 'The native model importer failed.')); }
 				else { resolve(); }
 			});
 		});
-		return JSON.parse(await fs.readFile(output, 'utf8'));
+		if (signal.aborted) { throw new Error('Import cancelled'); }
+		onProgress?.({ fraction: 0.97, stage: 'Reading imported geometry' });
+		const contents = await fs.readFile(output, 'utf8');
+		if (signal.aborted) { throw new Error('Import cancelled'); }
+		const model = JSON.parse(contents);
+		onProgress?.({ fraction: 1, stage: 'Preparing view' });
+		return model;
 	} finally { await fs.rm(directory, { recursive: true, force: true }); }
 }

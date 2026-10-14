@@ -398,7 +398,12 @@ impl eframe::App for Viewer {
                             self.loading_name,
                             job.elapsed().as_secs_f64()
                         ));
-                        ui.label(job.progress());
+                        let progress = job.progress();
+                        let bar = egui::ProgressBar::new(progress.fraction.unwrap_or(0.0))
+                            .desired_width(180.0)
+                            .animate(true);
+                        ui.add(bar);
+                        ui.label(progress.stage);
                     }
                     if ui.button("Cancel").clicked() {
                         self.receiver = None;

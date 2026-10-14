@@ -1,5 +1,8 @@
-use crate::model::{self, Model};
-use anyhow::{bail, Context, Result};
+use crate::{
+    model::{self, Model},
+    step_cache::StepCache,
+};
+use anyhow::{bail, ensure, Context, Result};
 use bincode::Options;
 use std::{
     fs::{self, File},
@@ -10,6 +13,49 @@ use std::{
 };
 
 const IMPORT_TIMEOUT: Duration = Duration::from_secs(180);
+const PROGRESS_PREFIX: &str = "MODEL_PROGRESS: ";
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct ImportProgress {
+    pub fraction: Option<f32>,
+    pub stage: String,
+}
+
+impl Default for ImportProgress {
+    fn default() -> Self {
+        Self {
+            fraction: None,
+            stage: "Reading model".into(),
+        }
+    }
+}
+
+impl ImportProgress {
+    fn from_line(line: &str) -> Option<Self> {
+        let progress: Self = serde_json::from_str(line.strip_prefix(PROGRESS_PREFIX)?).ok()?;
+        if progress.stage.is_empty()
+            || progress.stage.len() > 160
+            || progress
+                .fraction
+                .is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
+        {
+            return None;
+        }
+        Some(progress)
+    }
+}
+
+pub fn report_progress(fraction: Option<f32>, stage: &str) {
+    if std::env::var_os("MODEL_VIEWER_IMPORT_PROGRESS").is_some() {
+        let progress = ImportProgress {
+            fraction,
+            stage: stage.into(),
+        };
+        if let Ok(json) = serde_json::to_string(&progress) {
+            eprintln!("{PROGRESS_PREFIX}{json}");
+        }
+    }
+}
 
 pub struct ImportJob {
     child: Child,
@@ -32,6 +78,7 @@ impl ImportJob {
             .arg(tolerance.to_string())
             .arg(directory.path().join("model.bin"))
             .env("MODEL_VIEWER_IMPORT_TRACE", "1")
+            .env("MODEL_VIEWER_IMPORT_PROGRESS", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(log));
@@ -56,14 +103,13 @@ impl ImportJob {
         self.started.elapsed()
     }
 
-    pub fn progress(&self) -> String {
+    pub fn progress(&self) -> ImportProgress {
         fs::read_to_string(self.directory.path().join("import.log"))
             .unwrap_or_default()
             .lines()
             .rev()
-            .find(|line| line.starts_with("STEP:"))
-            .unwrap_or("Reading model")
-            .to_owned()
+            .find_map(ImportProgress::from_line)
+            .unwrap_or_default()
     }
 
     pub fn poll(&mut self) -> Result<Option<Model>> {
@@ -106,21 +152,26 @@ impl Drop for ImportJob {
 
 pub fn run_worker(path: &Path, tolerance: f64, output: &Path) -> Result<()> {
     let model = load_worker_model(path, tolerance, output)?;
+    report_progress(Some(0.95), "Transferring model");
     let mut writer = BufWriter::new(File::create(output)?);
     bincode::DefaultOptions::new().serialize_into(&mut writer, &model)?;
     writer.flush()?;
+    report_progress(Some(1.0), "Model ready");
     Ok(())
 }
 
 pub fn export_worker(path: &Path, tolerance: f64, output: &Path) -> Result<()> {
     let model = load_worker_model(path, tolerance, output)?;
+    report_progress(Some(0.95), "Transferring model");
     let mut writer = BufWriter::new(File::create(output)?);
     serde_json::to_writer(&mut writer, &model)?;
     writer.flush()?;
+    report_progress(Some(1.0), "Model ready");
     Ok(())
 }
 
 fn load_worker_model(path: &Path, tolerance: f64, output: &Path) -> Result<Model> {
+    report_progress(None, "Reading model");
     let name = path
         .file_name()
         .unwrap_or_default()
@@ -133,20 +184,78 @@ fn load_worker_model(path: &Path, tolerance: f64, output: &Path) -> Result<Model
         .to_ascii_lowercase();
     let staged;
     let path = if matches!(extension.as_str(), "step" | "stp") {
+        ensure!(
+            tolerance.is_finite() && tolerance > 0.0,
+            "STEP tolerance must be positive"
+        );
+        report_progress(Some(0.05), "Preparing STEP file");
+        let started = Instant::now();
         staged = output.with_file_name("input.step");
         fs::copy(path, &staged).context("Cannot read STEP file")?;
+        if std::env::var_os("MODEL_VIEWER_IMPORT_TRACE").is_some() {
+            eprintln!(
+                "STEP: staged snapshot in {:.3}s",
+                started.elapsed().as_secs_f64()
+            );
+        }
         staged.as_path()
     } else {
         path
     };
-    let mut model = model::load(path, tolerance)?;
+    let cache = if matches!(extension.as_str(), "step" | "stp") {
+        report_progress(Some(0.10), "Checking mesh cache");
+        StepCache::for_source(path, tolerance).ok().flatten()
+    } else {
+        None
+    };
+    let mut model = match cache.as_ref().and_then(StepCache::load) {
+        Some(model) => {
+            report_progress(Some(0.90), "Using cached geometry");
+            if std::env::var_os("MODEL_VIEWER_IMPORT_TRACE").is_some() {
+                eprintln!("STEP: reused verified mesh cache");
+            }
+            model
+        }
+        None => {
+            let model = model::load(path, tolerance)?;
+            if let Some(cache) = cache {
+                let _ = cache.store(&model);
+            }
+            model
+        }
+    };
     model.name = name;
+    report_progress(Some(0.92), "Preparing display");
     Ok(model)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn structured_progress_accepts_stages_and_rejects_invalid_values() {
+        let progress = ImportProgress::from_line(
+            "MODEL_PROGRESS: {\"fraction\":0.65,\"stage\":\"Repairing surfaces\"}",
+        )
+        .unwrap();
+        assert_eq!(progress.fraction, Some(0.65));
+        assert_eq!(progress.stage, "Repairing surfaces");
+        assert!(ImportProgress::from_line(
+            "MODEL_PROGRESS: {\"fraction\":null,\"stage\":\"Reading model\"}"
+        )
+        .unwrap()
+        .fraction
+        .is_none());
+        for line in [
+            "STEP: transferred roots",
+            "MODEL_PROGRESS: broken",
+            "MODEL_PROGRESS: {\"fraction\":2,\"stage\":\"Reading\"}",
+            "MODEL_PROGRESS: {\"fraction\":0,\"stage\":\"\"}",
+        ] {
+            assert!(ImportProgress::from_line(line).is_none());
+        }
+    }
 
     #[test]
     fn webview_export_preserves_model_data() {

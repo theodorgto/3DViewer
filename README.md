@@ -38,6 +38,34 @@ Reload VS Code, trust the workspace, and open a model using **3DViewer: Open Mod
 or **Reopen Editor With > 3DViewer**. The extension bundles the native viewer;
 Rust and Node.js are only needed to build, not to use the installed apps.
 
+Both viewers show a loading progress bar, the current import stage, elapsed
+time, and cancellation. STEP progress advances at real stage boundaries; it is
+not an estimate of time remaining. Other formats use an animated indicator
+until geometry is ready. Cached STEP imports report cache reuse.
+
+## STEP Performance
+
+STEP meshing runs in parallel and extracts positions/triangles in bulk, avoiding
+unused native normals and UVs. Healing, tolerances, assembly placement, display
+normals, and incomplete-model warnings are unchanged. On a Ryzen 9 9950X, the
+36.6 MB TRIOS mount's uncached median improved from 11.8 s to 10.9 s; its
+meshing/extraction stage fell from 1.29 s to 0.58 s. Three real models produced
+byte-identical output before and after these changes.
+
+Desktop and VS Code share a local, checksum-verified STEP mesh cache. Steady
+TRIOS repeat imports took 0.23 s; cached JSON exports took 0.25-0.31 s. These
+are worker timings, not complete webview render timings. Startup outliers occur,
+and a first import still performs full CAD processing. Cache keys include the
+complete staged file contents, tolerance, and importer executable contents, so
+file changes, quality changes, and software updates cannot reuse stale meshes.
+
+The cache stores model geometry locally under
+`%LOCALAPPDATA%\3DViewer\step-cache`, with a 512 MiB eviction budget and
+128 MiB entry limit. Corrupt or unusable entries fall back to normal import.
+Delete that directory to clear it. `MODEL_VIEWER_DISABLE_CACHE=1` bypasses
+caching; `MODEL_VIEWER_CACHE_DIR` overrides its location. For cache and CAD phase
+timings, set `MODEL_VIEWER_IMPORT_TRACE=1` before launching an import worker.
+
 ## Limitations And Licensing
 
 Read-only geometry viewing, not CAD editing or validated measurement. Textures,

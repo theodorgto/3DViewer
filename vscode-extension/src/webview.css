@@ -24,6 +24,7 @@ canvas { display: block; width: 100%; height: 100%; touch-action: none; }
 #empty { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; color: var(--vscode-descriptionForeground, #a7b3ab); }
 footer { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 6px 12px; border-top: 1px solid var(--vscode-panel-border, #414643); font-variant-numeric: tabular-nums; }
 #statistics { color: var(--vscode-descriptionForeground, #a7b3ab); overflow-wrap: anywhere; }
-progress { width: 44px; height: 4px; }
+progress { width: 180px; max-width: 100%; height: 10px; flex-shrink: 0; accent-color: var(--vscode-progressBar-background, #78b49a); }
+#status { min-width: 0; overflow-wrap: anywhere; }
 [hidden] { display: none !important; }
-@media (max-width: 520px) { header { gap: 7px; padding: 6px; } #name { max-width: 180px; } footer { gap: 5px; padding: 6px; } }
+@media (max-width: 520px) { header { gap: 7px; padding: 6px; } #name { max-width: 180px; } footer { gap: 5px; padding: 6px; } progress { width: 100%; flex-basis: 100%; } }

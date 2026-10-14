@@ -23,7 +23,7 @@ app.innerHTML = `<header><img class="brand-logo" src="${app.dataset.logo || 'dis
 <label id="point-control" hidden>Size<input id="point-size" type="range" min="1" max="12" value="3" aria-label="Point size"></label></header>
 <div id="warning" role="alert" hidden></div><div id="error" role="alert" hidden></div>
 <main id="viewport"><div id="empty">Loading model</div></main>
-<footer><progress id="activity" aria-label="Loading"></progress><span id="status">Loading</span><span id="statistics"></span></footer>`;
+<footer><progress id="activity" max="1" aria-label="Model loading progress"></progress><span id="status" role="status">Loading</span><span id="statistics"></span></footer>`;
 for (const [identifier, icon] of [['fit', Maximize2], ['reset', RotateCcw], ['reload', RefreshCw], ['external', ExternalLink], ['cancel', X]] as const) {
 	document.getElementById(identifier)!.append(createElement(icon));
 }
@@ -31,7 +31,7 @@ const viewport = document.getElementById('viewport')!;
 const error = document.getElementById('error')!;
 const warning = document.getElementById('warning')!;
 const status = document.getElementById('status')!;
-const activity = document.getElementById('activity')!;
+const activity = document.getElementById('activity') as HTMLProgressElement;
 const empty = document.getElementById('empty')!;
 const checked = (identifier: string) => (document.getElementById(identifier) as HTMLInputElement).checked;
 let renderer: THREE.WebGLRenderer;
@@ -68,7 +68,22 @@ let object: THREE.Mesh | THREE.Points | undefined;
 let mode = 'solid';
 let importing = true;
 let started = Date.now();
+let loadingStage = 'Reading model';
+let loadGeneration = 0;
 function render() { renderer.render(scene, camera); }
+
+function updateLoadingStatus() {
+	status.textContent = `${loadingStage} (${Math.floor((Date.now() - started) / 1000)}s)`;
+	activity.setAttribute('aria-valuetext', loadingStage);
+	empty.textContent = loadingStage;
+	viewport.setAttribute('aria-busy', 'true');
+}
+
+function finishImport() {
+	importing = false; activity.hidden = true;
+	document.getElementById('cancel')!.hidden = true;
+	viewport.setAttribute('aria-busy', 'false');
+}
 
 function resize() {
 	const width = Math.max(viewport.clientWidth, 1); const height = Math.max(viewport.clientHeight, 1);
@@ -163,15 +178,31 @@ function showModel(data: ModelData) {
 window.addEventListener('message', event => {
 	const message = event.data;
 	if (message?.type === 'loading') {
-		importing = true; started = Date.now(); activity.hidden = false; document.getElementById('cancel')!.hidden = false;
-		document.getElementById('name')!.textContent = message.name; error.hidden = true; status.textContent = 'Loading';
-	} else if (message?.type === 'model' || message?.type === 'error') {
-		importing = false; activity.hidden = true; document.getElementById('cancel')!.hidden = true;
-		if (message.type === 'model') { showModel(message.model); }
-		else { error.textContent = message.error; error.hidden = false; empty.hidden = true; status.textContent = 'Import failed'; }
+		loadGeneration++; importing = true; started = Date.now(); loadingStage = 'Reading model';
+		activity.hidden = false; activity.removeAttribute('value'); document.getElementById('cancel')!.hidden = false;
+		document.getElementById('name')!.textContent = message.name; error.hidden = true;
+		empty.hidden = !!model; updateLoadingStatus();
+	} else if (message?.type === 'progress' && importing && typeof message.stage === 'string') {
+		loadingStage = message.stage;
+		if (typeof message.fraction === 'number' && Number.isFinite(message.fraction)) {
+			activity.value = Math.max(activity.hasAttribute('value') ? activity.value : 0, Math.min(1, Math.max(0, message.fraction)));
+		} else { activity.removeAttribute('value'); }
+		updateLoadingStatus();
+	} else if (message?.type === 'model') {
+		const current = ++loadGeneration;
+		loadingStage = 'Preparing view'; activity.value = 1; updateLoadingStatus();
+		setTimeout(() => {
+			if (current !== loadGeneration) { return; }
+			try { showModel(message.model); }
+			catch (failure) { error.textContent = String(failure); error.hidden = false; empty.hidden = true; status.textContent = 'Import failed'; }
+			finally { finishImport(); }
+		}, 0);
+	} else if (message?.type === 'error') {
+		loadGeneration++; finishImport();
+		error.textContent = message.error; error.hidden = false; empty.hidden = true; status.textContent = message.error === 'Import cancelled' ? 'Import cancelled' : 'Import failed';
 	}
 });
-setInterval(() => { if (importing) { status.textContent = `Loading (${Math.floor((Date.now() - started) / 1000)}s)`; } }, 1000);
+setInterval(() => { if (importing) { updateLoadingStatus(); } }, 1000);
 document.getElementById('fit')!.addEventListener('click', fit);
 document.getElementById('reset')!.addEventListener('click', resetView);
 for (const identifier of ['reload', 'cancel', 'external']) { document.getElementById(identifier)!.addEventListener('click', () => host.postMessage({ type: identifier })); }
