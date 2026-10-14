@@ -2,6 +2,7 @@ target/
 /samples/
 /models/
 /examples/
+/scripts/generate-logo.ps1
 /.vscode/
 /vendor/opencascade-sys/examples/
 /vendor/opencascade-sys/tests/
